@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onBeforeUnmount } from 'vue';
 import { useEditor, EditorContent, BubbleMenu } from '@tiptap/vue-3';
+import { Mark, mergeAttributes } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import BubbleMenuExtension from '@tiptap/extension-bubble-menu';
 import Collaboration from '@tiptap/extension-collaboration';
@@ -26,9 +27,39 @@ const props = defineProps<Props>();
 const isSourceMode = ref(false);
 const sourceContent = ref('');
 
+const UserColor = Mark.create({
+  name: 'userColor',
+  addAttributes() {
+    return {
+      color: {
+        default: null,
+        parseHTML: (element) => element.getAttribute('data-user-color') || element.style.color || null,
+        renderHTML: (attributes) => {
+          if (!attributes.color) return {};
+          return {
+            'data-user-color': attributes.color,
+            style: `color: ${attributes.color}`,
+          };
+        },
+      },
+    };
+  },
+  parseHTML() {
+    return [
+      {
+        tag: 'span[data-user-color]',
+      },
+    ];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ['span', mergeAttributes(HTMLAttributes), 0];
+  },
+});
+
 const editor = useEditor({
   editable: props.editable,
   extensions: [
+    UserColor,
     StarterKit.configure({
       history: false, // Y.js handles history
     }),
@@ -46,6 +77,25 @@ const editor = useEditor({
   editorProps: {
     attributes: {
       class: 'prose prose-slate max-w-none dark:prose-invert focus:outline-none min-h-[800px]',
+    },
+    handleTextInput(view, from, to, text) {
+      if (!props.editable) return false;
+      const markType = view.state.schema.marks.userColor;
+      if (!markType) return false;
+      const tr = view.state.tr.insertText(text, from, to);
+      tr.addMark(from, from + text.length, markType.create({ color: props.user.color }));
+      view.dispatch(tr);
+      return true;
+    },
+    handlePaste(view, event, slice) {
+      if (!props.editable) return false;
+      const markType = view.state.schema.marks.userColor;
+      if (!markType) return false;
+      const { from, to } = view.state.selection;
+      const tr = view.state.tr.replaceRange(from, to, slice);
+      tr.addMark(from, from + slice.size, markType.create({ color: props.user.color }));
+      view.dispatch(tr);
+      return true;
     },
   },
 });
@@ -107,7 +157,16 @@ const downloadMarkdown = (filename: string) => {
   URL.revokeObjectURL(url);
 };
 
-defineExpose({ downloadMarkdown });
+const clearUserColors = () => {
+  if (!editor.value) return;
+  const { state, view } = editor.value;
+  const markType = state.schema.marks.userColor;
+  if (!markType) return;
+  const tr = state.tr.removeMark(0, state.doc.content.size, markType);
+  view.dispatch(tr);
+};
+
+defineExpose({ downloadMarkdown, clearUserColors });
 
 onBeforeUnmount(() => {
   editor.value?.destroy();

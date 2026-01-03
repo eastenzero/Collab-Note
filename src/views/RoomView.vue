@@ -12,11 +12,67 @@ import Editor from '../components/Editor.vue';
 const route = useRoute();
 const roomId = route.params.roomId as string;
 
-// --- State ---
+function withQueuedChannelSend(
+  base: any,
+  onStatus?: (info: { channel: string; status: any; err: any }) => void,
+) {
+  return new Proxy(base, {
+    get(target, prop, receiver) {
+      if (prop === 'channel') {
+        return (name: string, opts?: any) => {
+          const ch = target.channel(name, opts);
+          const originalSend = ch.send.bind(ch);
+          const originalSubscribe = ch.subscribe.bind(ch);
+          let subscribed = false;
+          let failed = false;
+          const queue: Array<{ payload: any; resolve: (v: any) => void; reject: (e: any) => void }> = [];
+
+          ch.send = (payload: any) => {
+            if (subscribed) return originalSend(payload);
+            if (failed) return Promise.reject(new Error('Realtime channel is not subscribed'));
+            return new Promise((resolve, reject) => {
+              queue.push({ payload, resolve, reject });
+            });
+          };
+
+          ch.subscribe = (callback?: any) => {
+            return originalSubscribe((status: any, err: any) => {
+              if (onStatus) onStatus({ channel: name, status, err });
+              if (status === 'SUBSCRIBED') {
+                subscribed = true;
+                const pending = queue.splice(0, queue.length);
+                pending.forEach(({ payload, resolve, reject }) => {
+                  originalSend(payload).then(resolve).catch(reject);
+                });
+              }
+
+              if (!subscribed && (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')) {
+                failed = true;
+                const pending = queue.splice(0, queue.length);
+                pending.forEach(({ reject }) => reject(err || new Error(status)));
+              }
+
+              if (callback) callback(status, err);
+            });
+          };
+
+          return ch;
+        };
+      }
+
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value === 'function') return value.bind(target);
+      return value;
+    },
+  });
+}
+
 // --- State ---
 const ydoc = new Y.Doc();
 const provider = shallowRef<any>(null);
 const status = ref<'connected' | 'disconnected' | 'connecting'>('connecting');
+const providerReady = ref(false);
+const initialAwarenessSent = ref(false);
 const users = ref<Array<{ id: number; name: string; color: string }>>([]);
 
 // Load user from localStorage or generate new
@@ -38,7 +94,9 @@ const updateUser = (newUser: { name: string; color: string }) => {
 // Save user to localStorage whenever it changes
 watch(currentUser, (newUser) => {
   localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
-  provider.value?.awareness.setLocalStateField('user', newUser);
+  if (providerReady.value) {
+    provider.value?.awareness.setLocalStateField('user', newUser);
+  }
 }, { deep: true });
 
 // Room Meta (Shared State)
@@ -49,6 +107,23 @@ const isAuthorized = ref(false); // Default to false, will be set to true if no 
 const unlockInput = ref('');
 const passwordError = ref(false);
 const isCheckingPassword = ref(true); // True until initial sync completes
+const didInitialCheck = ref(false);
+const connectionFailure = ref<string | null>(null);
+
+const retryConnection = () => {
+  window.location.reload();
+};
+
+const completeInitialCheck = () => {
+  if (didInitialCheck.value) return;
+  const hash = roomMeta.get('passwordHash') as string;
+  roomHasPassword.value = !!hash;
+  if (!hash) {
+    isAuthorized.value = true;
+  }
+  isCheckingPassword.value = false;
+  didInitialCheck.value = true;
+};
 
 const toggleLock = () => {
   const currentLockState = roomMeta.get('locked') as boolean;
@@ -167,6 +242,10 @@ const handleExport = () => {
   }
 };
 
+const handleClearColors = () => {
+  editorRef.value?.clearUserColors?.();
+};
+
 // --- Lifecycle ---
 // --- Supabase Provider ---
 import SupabaseProvider from 'y-supabase';
@@ -179,7 +258,7 @@ import { supabase } from '../utils/supabase';
 
 // ... (Router, State init remain same)
 
-onMounted(() => {
+onMounted(async () => {
   // Listen to room lock changes (key: 'locked')
   roomMeta.observe(() => {
     isLocked.value = !!roomMeta.get('locked');
@@ -199,43 +278,92 @@ onMounted(() => {
   
   // --- Supabase Provider ---
   console.log('Starting Supabase Provider...');
+  const { data: existingRoom, error: existingRoomError } = await supabase
+    .from('rooms')
+    .select('name')
+    .eq('name', roomId)
+    .maybeSingle();
+
+  if (existingRoomError) {
+    console.error('Failed to check room row:', existingRoomError);
+  }
+
+  if (!existingRoom) {
+    let { error: ensureRoomError } = await supabase
+      .from('rooms')
+      .insert({ name: roomId, document: [] as any });
+
+    if (ensureRoomError) {
+      ({ error: ensureRoomError } = await supabase
+        .from('rooms')
+        .insert({ name: roomId, document: '\\x' } as any));
+    }
+
+    if (ensureRoomError && (ensureRoomError as any).code !== '23505') {
+      console.error('Failed to ensure room row exists:', ensureRoomError);
+    }
+  }
+
+  const supabaseForProvider = withQueuedChannelSend(supabase, ({ channel, status, err }) => {
+    console.log('Realtime Channel Status:', channel, status);
+    if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') && !providerReady.value) {
+      connectionFailure.value = String(status);
+      console.error('Realtime Channel Error:', err);
+    }
+  });
   
   // Initialize Supabase Provider
-  const p = new SupabaseProvider(ydoc, supabase, {
-    channel: roomId, // Using roomId as channel
-    id: roomId,
-    tableName: 'rooms',      // Data table name
-    columnName: 'document',  // Column for Y.js binary data
+  const p = new SupabaseProvider(ydoc, supabaseForProvider, {
+    channel: roomId,
+    tableName: 'rooms',
+    columnName: 'document',
+    idName: 'name',   // TELL provider to use 'name' column as ID
+    id: roomId,        // Provide the string room ID
+    resyncInterval: false
   });
   
   provider.value = p;
 
+  setTimeout(() => {
+    if (!providerReady.value && !connectionFailure.value) {
+      connectionFailure.value = 'TIMEOUT';
+    }
+  }, 15000);
+
   // Listen for status changes
   p.on('status', (event: any) => {
     // Adapter for local status variable
-    status.value = event.status; // 'connected' | 'disconnected' | 'connecting'
-    console.log('Supabase Provider Status:', event.status);
+    const nextStatus = Array.isArray(event) ? event[0]?.status : event?.status;
+    if (nextStatus === 'connected' || nextStatus === 'connecting' || nextStatus === 'disconnected') {
+      status.value = nextStatus;
+      providerReady.value = nextStatus === 'connected';
+      if (!providerReady.value) {
+        initialAwarenessSent.value = false;
+      }
+    }
+    console.log('Supabase Provider Status:', nextStatus);
+  });
+
+  p.on('error', (err: any) => {
+    console.error('Supabase Provider Error:', err);
+  });
+
+  watch(providerReady, (ready) => {
+    if (!ready) return;
+    connectionFailure.value = null;
+    completeInitialCheck();
+    if (initialAwarenessSent.value) return;
+    provider.value?.awareness.setLocalStateField('user', {
+      name: currentUser.value.name,
+      color: currentUser.value.color,
+    });
+    initialAwarenessSent.value = true;
   });
   
   // Wait for sync to check password state
   p.on('synced', () => {
      console.log('Content loaded from Supabase');
-     
-     // Check initial password state
-    const hash = roomMeta.get('passwordHash') as string;
-    roomHasPassword.value = !!hash;
-    if (!hash) {
-      // No password set, authorize immediately
-      isAuthorized.value = true;
-    }
-    
-    isCheckingPassword.value = false;
-  });
-
-  // Awareness (Presence)
-  p.awareness.setLocalStateField('user', {
-    name: currentUser.value.name,
-    color: currentUser.value.color,
+    completeInitialCheck();
   });
 
   p.awareness.on('change', () => {
@@ -269,9 +397,16 @@ onBeforeUnmount(() => {
            <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-slate-400 dark:text-slate-300 animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
         </div>
         <div>
-          <h2 class="text-xl font-bold text-slate-900 dark:text-white">正在加载...</h2>
-          <p class="text-slate-500 dark:text-slate-400 mt-2 text-sm">正在同步房间数据，请稍候。</p>
+          <h2 class="text-xl font-bold text-slate-900 dark:text-white">{{ connectionFailure ? '连接失败' : '正在加载...' }}</h2>
+          <p class="text-slate-500 dark:text-slate-400 mt-2 text-sm">{{ connectionFailure ? 'Realtime 订阅未成功，请检查 Supabase Realtime 设置或刷新重试。' : '正在同步房间数据，请稍候。' }}</p>
         </div>
+        <button
+          v-if="connectionFailure"
+          @click="retryConnection"
+          class="w-full h-12 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold shadow-lg shadow-cyan-500/20 active:scale-95 transition-all"
+        >
+          刷新重试
+        </button>
       </div>
     </div>
     
@@ -317,6 +452,7 @@ onBeforeUnmount(() => {
         @update:user="updateUser"
         @toggle-lock="toggleLock"
         @export-markdown="handleExport"
+        @clear-colors="handleClearColors"
         @set-password="handleSetPassword"
         @remove-password="handleRemovePassword"
       />
@@ -332,7 +468,7 @@ onBeforeUnmount(() => {
           :ydoc="ydoc" 
           :provider="provider" 
           :user="currentUser"
-          :editable="!isLocked"
+          :editable="!isLocked && providerReady"
         />
       </main>
     </div>

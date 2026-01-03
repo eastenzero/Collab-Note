@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { Lock, Unlock, User, Settings, Cloud, CloudOff, Feather, Sun, Moon, Download, Shield } from 'lucide-vue-next';
+import { Lock, Unlock, User, Settings, Cloud, CloudOff, Feather, Sun, Moon, Download, Shield, Eraser } from 'lucide-vue-next';
 
 interface Props {
   status: 'connected' | 'disconnected' | 'connecting';
@@ -14,7 +14,7 @@ const props = withDefaults(defineProps<Props>(), {
   users: () => [],
   hasPassword: false
 });
-const emit = defineEmits(['update:user', 'toggle-lock', 'export-markdown', 'set-password', 'remove-password']);
+const emit = defineEmits(['update:user', 'toggle-lock', 'export-markdown', 'set-password', 'remove-password', 'clear-colors']);
 
 // Popover States
 const showSettingsMenu = ref(false);
@@ -158,6 +158,21 @@ const statusText = computed(() => {
                >
                  下载
                </button>
+            </div>
+
+            <div class="h-px bg-slate-100 dark:bg-white/10 my-1"></div>
+
+            <div class="flex items-center justify-between w-full p-2">
+              <div class="flex items-center gap-2">
+                <Eraser class="w-4 h-4 text-rose-500" />
+                <span class="text-sm font-medium text-slate-700 dark:text-slate-200">清除颜色标注</span>
+              </div>
+              <button
+                @click="emit('clear-colors')"
+                class="px-3 py-1 text-xs font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded transition-colors"
+              >
+                清除
+              </button>
             </div>
 
             <div class="h-px bg-slate-100 dark:bg-white/10 my-1"></div>
