@@ -5,6 +5,8 @@ import * as Y from 'yjs';
 
 import Header from '../components/Header.vue';
 import Editor from '../components/Editor.vue';
+import SupabaseProvider from 'y-supabase';
+import { supabase, supabaseConfigError } from '../utils/supabase';
 
 
 
@@ -247,18 +249,12 @@ const handleClearColors = () => {
 };
 
 // --- Lifecycle ---
-// --- Supabase Provider ---
-import SupabaseProvider from 'y-supabase';
-import { supabase } from '../utils/supabase';
-
-// ... (Header imports remain same)
-
-// --- Constants ---
-// const SIGNALING_PORT = 4444; // Removed
-
-// ... (Router, State init remain same)
-
 onMounted(async () => {
+  if (supabaseConfigError || !supabase) {
+    connectionFailure.value = supabaseConfigError || 'SUPABASE_CONFIG_MISSING';
+    isCheckingPassword.value = true;
+    return;
+  }
   // Listen to room lock changes (key: 'locked')
   roomMeta.observe(() => {
     isLocked.value = !!roomMeta.get('locked');
@@ -398,7 +394,7 @@ onBeforeUnmount(() => {
         </div>
         <div>
           <h2 class="text-xl font-bold text-slate-900 dark:text-white">{{ connectionFailure ? '连接失败' : '正在加载...' }}</h2>
-          <p class="text-slate-500 dark:text-slate-400 mt-2 text-sm">{{ connectionFailure ? 'Realtime 订阅未成功，请检查 Supabase Realtime 设置或刷新重试。' : '正在同步房间数据，请稍候。' }}</p>
+          <p class="text-slate-500 dark:text-slate-400 mt-2 text-sm">{{ connectionFailure ? (String(connectionFailure).includes('Supabase URL or Key') ? '缺少 Supabase 环境变量（VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY），请在 EdgeOne 构建环境中配置后重新构建部署。' : 'Realtime 订阅未成功，请检查 Supabase Realtime 设置或刷新重试。') : '正在同步房间数据，请稍候。' }}</p>
         </div>
         <button
           v-if="connectionFailure"
