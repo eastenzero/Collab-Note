@@ -2,17 +2,11 @@
 import { ref, shallowRef, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import * as Y from 'yjs';
-// @ts-ignore - y-supabase missing types
-// import SupabaseProvider from 'y-supabase';
-// @ts-ignore
-import { WebrtcProvider } from 'y-webrtc';
-// @ts-ignore
-import { IndexeddbPersistence } from 'y-indexeddb';
+
 import Header from '../components/Header.vue';
 import Editor from '../components/Editor.vue';
 
-// --- Constants ---
-const SIGNALING_PORT = 4444;
+
 
 // --- Router ---
 const route = useRoute();
@@ -22,7 +16,6 @@ const roomId = route.params.roomId as string;
 // --- State ---
 const ydoc = new Y.Doc();
 const provider = shallowRef<any>(null);
-const persistence = ref<any>(null);
 const status = ref<'connected' | 'disconnected' | 'connecting'>('connecting');
 const users = ref<Array<{ id: number; name: string; color: string }>>([]);
 
@@ -175,6 +168,17 @@ const handleExport = () => {
 };
 
 // --- Lifecycle ---
+// --- Supabase Provider ---
+import SupabaseProvider from 'y-supabase';
+import { supabase } from '../utils/supabase';
+
+// ... (Header imports remain same)
+
+// --- Constants ---
+// const SIGNALING_PORT = 4444; // Removed
+
+// ... (Router, State init remain same)
+
 onMounted(() => {
   // Listen to room lock changes (key: 'locked')
   roomMeta.observe(() => {
@@ -185,9 +189,6 @@ onMounted(() => {
     roomHasPassword.value = !!hash;
     
     // Gatekeeper Rule: If hash exists and we are not authorized, LOCK IT.
-    // Small optimization: If we just Set the password, isAuthorized is true, so no lock.
-    // Note: History visibility is handled by Vue watch on roomHasPassword
-    
     if (hash && !isAuthorized.value) {
       // Logic handled by v-if in template, state is right
     } else if (!hash) {
@@ -196,33 +197,31 @@ onMounted(() => {
     }
   });
   
-  // Initial Check (important if joining an existing room)
-  // Wait a tick for Yjs sync? Actually observer fires on sync.
-  // But we can check straight after connect or rely on observer.
-
-  // --- LOCAL TEST MODE: WebRTC + IndexedDB ---
-  console.log('Starting Local Room Mode (WebRTC + IndexedDB)...');
+  // --- Supabase Provider ---
+  console.log('Starting Supabase Provider...');
   
-  // 1. WebRTC Provider (P2P Sync)
-  // Auto-detect signaling server on the same host (LAN IP)
-  const signalingUrl = `ws://${window.location.hostname}:${SIGNALING_PORT}`;
-  console.log('Connecting to Signaling Server:', signalingUrl);
-
-  // @ts-ignore
-  const p = new WebrtcProvider(roomId, ydoc, {
-    signaling: [signalingUrl],
+  // Initialize Supabase Provider
+  const p = new SupabaseProvider(ydoc, supabase, {
+    channel: roomId, // Using roomId as channel
+    id: roomId,
+    tableName: 'rooms',      // Data table name
+    columnName: 'document',  // Column for Y.js binary data
   });
+  
   provider.value = p;
 
-  // 2. IndexedDB Persistence (Offline Storage)
-  // @ts-ignore
-  const persist = new IndexeddbPersistence(roomId, ydoc);
-  persistence.value = persist;
-
-  persist.on('synced', () => {
-    console.log('Content loaded from local database');
-    
-    // Check initial password state
+  // Listen for status changes
+  p.on('status', (event: any) => {
+    // Adapter for local status variable
+    status.value = event.status; // 'connected' | 'disconnected' | 'connecting'
+    console.log('Supabase Provider Status:', event.status);
+  });
+  
+  // Wait for sync to check password state
+  p.on('synced', () => {
+     console.log('Content loaded from Supabase');
+     
+     // Check initial password state
     const hash = roomMeta.get('passwordHash') as string;
     roomHasPassword.value = !!hash;
     if (!hash) {
@@ -230,15 +229,7 @@ onMounted(() => {
       isAuthorized.value = true;
     }
     
-    // Note: History visibility is handled by Vue watch on roomHasPassword
-    // If hash exists, user must unlock via attemptUnlock()
     isCheckingPassword.value = false;
-  });
-
-  // Status Listeners (WebRTC)
-  p.on('status', (event: any) => {
-    status.value = event.connected ? 'connected' : 'disconnected';
-    console.log('WebRTC Status:', event.connected ? 'Connected' : 'Disconnected');
   });
 
   // Awareness (Presence)
@@ -264,7 +255,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   provider.value?.destroy();
-  persistence.value?.destroy();
   ydoc.destroy();
 });
 </script>
