@@ -89,6 +89,7 @@ const editor = useEditor({
     },
     handlePaste(view, event, slice) {
       if (!props.editable) return false;
+      void event;
       const markType = view.state.schema.marks.userColor;
       if (!markType) return false;
       const { from, to } = view.state.selection;
