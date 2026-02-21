@@ -7,6 +7,7 @@ import Header from '../components/Header.vue';
 import Editor from '../components/Editor.vue';
 import SupabaseProvider from 'y-supabase';
 import { supabase, supabaseConfigError } from '../utils/supabase';
+import { WebrtcProvider } from 'y-webrtc';
 
 
 
@@ -250,11 +251,6 @@ const handleClearColors = () => {
 
 // --- Lifecycle ---
 onMounted(async () => {
-  if (supabaseConfigError || !supabase) {
-    connectionFailure.value = supabaseConfigError || 'SUPABASE_CONFIG_MISSING';
-    isCheckingPassword.value = true;
-    return;
-  }
   // Listen to room lock changes (key: 'locked')
   roomMeta.observe(() => {
     isLocked.value = !!roomMeta.get('locked');
@@ -271,7 +267,46 @@ onMounted(async () => {
       isAuthorized.value = true;
     }
   });
-  
+
+  if (supabaseConfigError || !supabase) {
+    console.warn('Supabase not configured, falling back to WebRTC for local development');
+    const p = new WebrtcProvider(roomId, ydoc, { signaling: ['ws://localhost:4444'] });
+    provider.value = p;
+    
+    p.on('synced', () => {
+      completeInitialCheck();
+    });
+
+    status.value = 'connected';
+    providerReady.value = true;
+    connectionFailure.value = null;
+    isCheckingPassword.value = false;
+    completeInitialCheck(); // Check initially just in case
+
+    p.awareness.on('change', () => {
+      const states = p.awareness.getStates();
+      const activeUsers: any[] = [];
+      states.forEach((state: any, clientId: number) => {
+        if (state.user) {
+          activeUsers.push({
+            id: clientId,
+            ...state.user,
+          });
+        }
+      });
+      users.value = activeUsers;
+    });
+
+    setTimeout(() => {
+      p.awareness.setLocalStateField('user', {
+        name: currentUser.value.name,
+        color: currentUser.value.color,
+      });
+      initialAwarenessSent.value = true;
+    }, 500);
+
+    return;
+  }
   // --- Supabase Provider ---
   console.log('Starting Supabase Provider...');
   const { data: existingRoom, error: existingRoomError } = await supabase
